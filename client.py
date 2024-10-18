@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from random import sample
+import string
 import uuid
 
 from aiohttp import ClientSession
@@ -33,9 +35,11 @@ class ShopwareClient:
             url (str): The base URL of the Shopware API.
         """
         self.url = url
+        self.sales_channel_id = os.getenv("SALES_CHANNEL_ID")
         self.currencies = dict()
         self.categories = dict()
         self.taxes = dict()
+        self.media_folders = dict()
 
     async def start(self) -> None:
         """
@@ -82,7 +86,7 @@ class ShopwareClient:
 
     async def refresh(self) -> None:
         """
-        Refresh the token 
+        Refresh the token
         """
         suffix = "/api/oauth/token"
 
@@ -106,8 +110,6 @@ class ShopwareClient:
             )
             self.refresh_token = content.get("refresh_token")
 
-
-
     async def send_data(self, data: list[Product]) -> None:
         """
         Sends product data to the Shopware API.
@@ -121,7 +123,7 @@ class ShopwareClient:
         suffix = "/api/product"
 
         task = asyncio.create_task(self.refresh())
-    
+
         for product in data:
             try:
                 product_data = await self._product_data(product)
@@ -132,6 +134,9 @@ class ShopwareClient:
                 if product_id is None:
                     logging.info("send create product")
                     logging.debug(f"send create request with data: {product_data}")
+                    product_data["visibilities"] = [
+                        {"salesChannelId": self.sales_channel_id, "visibility": 30},
+                    ]
                     response = await self.session.post(url=suffix, json=product_data)
                 else:
                     logging.info(f"send update product where id is {product_id}")
@@ -152,7 +157,7 @@ class ShopwareClient:
             except Exception as e:
                 logging.error(f"error when create product data | skip: {e}")
                 continue
-        
+
         task.cancel()
 
     async def _product_data(self, product: Product) -> dict:
@@ -183,9 +188,30 @@ class ShopwareClient:
         ]
 
         category = dict()
-        category_id = await self._get_category_id(product.category)
+        category_name = product.category_set[-1]
+        category_id = await self._get_category_id(category_name)
         if category_id is None:
-            category["name"] = product.category
+            category["name"] = category_name
+
+            for i, parent in enumerate(product.category_set[:-1][::-1]):
+                last_parent = category
+                while True:
+                    par = last_parent.get("parent", None)
+                    if not par:
+                        break
+                    last_parent = par
+
+                parent_id = await self._get_category_id(parent)
+                if parent_id is not None:
+                    last_parent["parent"] = {"id": parent_id}
+                    break
+
+                last_parent["parent"] = {"name": parent}
+
+                if i == len(product.category_set) - 2:
+                    last_parent["parent"]["parent"] = {
+                        "id": await self._get_category_id("Home")
+                    }
         else:
             category["id"] = category_id
 
@@ -193,9 +219,44 @@ class ShopwareClient:
             category,
         ]
 
-        data["media"] = [
-            {"media": {"path": image_url}} for image_url in product.image_urls
-        ]
+        media = []
+        for i, image_url in enumerate(product.image_urls):
+            id_ = str(uuid.uuid4().hex)
+            resp_create = await self.session.post(
+                "/api/media",
+                json={
+                    "id": id_,
+                    "private": False,
+                    "mediaFolderId": await self._get_product_media_folder_id(),
+                },
+            )
+
+            if resp_create.status != 204:
+                content_create = await resp_create.json()
+                logging.error(f"could not create media | skip: {content_create}")
+                continue
+
+            file_name, extension = image_url.split("/")[-1].split(".")
+            
+            resp_upload = await self.session.post(
+                f"/api/_action/media/{id_}/upload?extension={extension}&fileName={file_name + ''.join(sample(string.ascii_letters, 5))}",
+                json={"url": image_url},
+            )
+
+            if resp_upload.status != 204:
+                content_upload = await resp_upload.json(content_type=None)
+                logging.error(
+                    f"could not upload media from url: {image_url} | skip: {content_upload}"
+                )
+                continue
+
+            if i == 0:
+                data["cover"] = {"mediaId": id_}
+                continue
+
+            media.append({"mediaId": id_})
+
+        data["media"] = media
 
         data["productNumber"] = str(uuid.uuid4())
         data["taxId"] = await self._get_standard_tax_id()
@@ -252,6 +313,30 @@ class ShopwareClient:
 
         return tax_id
 
+    async def _get_product_media_folder_id(self) -> str:
+        """
+        Gets the product media folder ID.
+
+        Returns:
+            str: The product_media_folder ID.
+        """
+        media_folder_id = self.media_folders.get("product", None)
+        if media_folder_id is None:
+            suffix = "/api/search/media-folder"
+
+            data = {"filter": {"name": "Product Media"}}
+
+            response = await self.session.post(suffix, json=data)
+            content = await response.json()
+
+            if len(content.get("data")) == 0:
+                return None
+
+            media_folder_id = content.get("data")[0].get("id")
+            self.media_folders["product"] = media_folder_id
+
+        return media_folder_id
+
     async def _get_category_id(self, name: str) -> str:
         """
         Gets the category ID for a given name.
@@ -275,7 +360,7 @@ class ShopwareClient:
                 return None
 
             category_id = content.get("data")[0].get("id")
-            self.currencies[name] = category_id
+            self.categories[name] = category_id
 
         return category_id
 

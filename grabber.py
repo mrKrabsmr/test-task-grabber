@@ -50,20 +50,24 @@ class GrowShopGrabber:
                             soup = BeautifulSoup(html, "html.parser")
 
                             try:
-                                soup.find("div", id="plh").find("div", class_="row").find("div", class_="thumbnail").find("a")
-                                logging.info("stop parsing cause it's general page of product catalogs")
+                                soup.find("div", id="plh").find(
+                                    "div", class_="row"
+                                ).find("div", class_="thumbnail").find("a")
+                                logging.info(
+                                    "stop parsing cause it's general page of product catalogs"
+                                )
                                 break
                             except Exception:
                                 pass
 
-                            category, links = self._parse_product_links(soup)
+                            category_set, links = self._parse_product_links(soup)
 
                             for link in links:
                                 try:
                                     async with session.get(link) as resp:
                                         html = await resp.text()
                                         soup_ = BeautifulSoup(html, "html.parser")
-                                        product = self._parse_product(soup_, category)
+                                        product = self._parse_product(soup_, category_set)
                                         products.append(product)
 
                                 except Exception as e:
@@ -118,7 +122,7 @@ class GrowShopGrabber:
 
         self.catalog_links = list(set(self.catalog_links))
 
-    def _parse_product_links(self, soup: BeautifulSoup) -> (str, list):
+    def _parse_product_links(self, soup: BeautifulSoup) -> (list, list):
         """
         Parses product links from a catalog page.
 
@@ -128,7 +132,10 @@ class GrowShopGrabber:
         Returns:
             tuple: A tuple containing the category name and a list of product links.
         """
-        title = soup.find("h1", class_="title").text
+        category_set = [
+            item.find_all("span")[-1].text
+            for item in soup.find("ol", id="bc").find_all("li", class_="bc-item")
+        ]
         elements = soup.find_all("a", class_="img-w")
 
         links = []
@@ -139,9 +146,9 @@ class GrowShopGrabber:
             href = el.attrs.get("href")
             links.append(href)
 
-        return title, links
+        return category_set, links
 
-    def _parse_product(self, soup: BeautifulSoup, category: str) -> Product:
+    def _parse_product(self, soup: BeautifulSoup, category_set: list) -> Product:
         """
         Parses product data from a product page.
 
@@ -154,20 +161,23 @@ class GrowShopGrabber:
         """
         name = soup.find("h1", class_="product-title").text or ""
         price = soup.find("strong", class_="price").find("span").text or ""
-        description = soup.find("div", class_="desc").text or ""
-        ean = soup.find("li", "product-sku").find("span").text or ""
+        description = soup.find("div", class_="desc") or ""
+        # product_number = soup.find("li", "product-sku").find("span").text or ""
+        ean = soup.find("li", "nav-it").find("span").text or ""
         image_urls = []
 
         gallery = soup.find("div", id="gallery")
         imgs = gallery.find_all("img")
         for img in imgs:
-            image_urls.append(img.attrs.get("src"))
+            img_webp = img.attrs.get("data-big-webp")
+            if img_webp:
+                image_urls.append(img_webp)
 
         return Product(
             name=name.strip(),
             price=price.strip(),
-            description=description.strip(),
-            category=category.strip(),
+            description=str(description),
+            category_set=category_set,
             image_urls=image_urls,
             ean=ean.strip(),
         )

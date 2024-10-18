@@ -11,11 +11,11 @@ class Product:
         ean (str): The European Article Number (EAN) of the product.
     """
 
-    def __init__(self, name, price, description, category, image_urls, ean):
+    def __init__(self, name, price, description, category_set, image_urls, ean):
         self.name = name
         self.price = price
         self.description = description
-        self.category = category
+        self.category_set = category_set
         self.image_urls = image_urls
         self.ean = ean
 
